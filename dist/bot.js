@@ -8,6 +8,7 @@ exports.sendAppLink = sendAppLink;
 const tslib_1 = require("tslib");
 const firebase_config_1 = require("./firebase-config");
 const dayjs_format_1 = require("./util/dayjs_format");
+const auth_token_service_1 = require("./services/auth-token.service");
 const node_telegram_bot_api_1 = tslib_1.__importDefault(require("node-telegram-bot-api"));
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!BOT_TOKEN) {
@@ -78,13 +79,27 @@ async function sendContactRequest(chatId) {
     const keyboard = createContactKeyboard();
     return sendMessage(chatId, '👋 Welcome to oneHR!\n\nTo continue, please share your phone number so we can verify your employee account.', keyboard);
 }
-async function sendAppLink(chatId, appUrl) {
-    await sendMessage(chatId, '✅ Phone verified and linked to your employee account!', { remove_keyboard: true });
-    return sendMessage(chatId, '⬇️ Click below to open your oneHR dashboard:', {
-        inline_keyboard: [
-            [{ text: '🚀 Open oneHR App', web_app: { url: appUrl } }]
-        ],
-    });
+async function sendAppLink(chatId, phoneNumber, projectName, employeeUid) {
+    try {
+        const authData = await (0, auth_token_service_1.generateEmployeeAuthToken)(employeeUid, projectName, phoneNumber);
+        const appUrl = generateAppUrl(phoneNumber, authData.projectId, employeeUid, authData.customToken);
+        await sendMessage(chatId, '✅ Phone verified and linked to your employee account!', { remove_keyboard: true });
+        return sendMessage(chatId, '⬇️ Click below to open your oneHR dashboard:', {
+            inline_keyboard: [
+                [{ text: '🚀 Open oneHR App', web_app: { url: appUrl } }]
+            ],
+        });
+    }
+    catch (error) {
+        console.error('Error generating auth token for app link:', error);
+        const basicUrl = generateAppUrl(phoneNumber);
+        await sendMessage(chatId, '✅ Phone verified! (Auto-login unavailable)', { remove_keyboard: true });
+        return sendMessage(chatId, '⬇️ Click below to open your oneHR dashboard:', {
+            inline_keyboard: [
+                [{ text: '🚀 Open oneHR App', web_app: { url: basicUrl } }]
+            ],
+        });
+    }
 }
 async function findEmployeeByPhoneNumber(phoneNumber) {
     const cached = firebase_config_1.employeeCache.get(phoneNumber);
@@ -106,9 +121,9 @@ async function findEmployeeByPhoneNumber(phoneNumber) {
             if (!query.empty) {
                 const doc = query.docs[0];
                 if (doc && doc.exists) {
-                    const employee = { id: doc.id, ...doc.data() };
+                    const employee = { id: doc.id, uid: doc.data().uid, ...doc.data() };
                     firebase_config_1.employeeCache.set(phoneNumber, employee, projectName);
-                    console.log(`Found employee ${employee.id} in project ${projectName}`);
+                    console.log(`Found employee ${employee.id} (UID: ${employee.uid}) in project ${projectName}`);
                     return { employee, projectName };
                 }
             }
@@ -141,10 +156,21 @@ async function updateEmployeeTelegramChatID(employeeId, chatId, projectName) {
         return false;
     }
 }
-function generateAppUrl(phoneNumber) {
+function generateAppUrl(phoneNumber, projectId, employeeUid, customToken) {
     const baseUrl = process.env.WEB_APP_URL || 'https://your-default-app-url.com';
     const encodedPhone = encodeURIComponent(phoneNumber);
-    return `${baseUrl}?phone=${encodedPhone}&t=${Date.now()}`;
+    const timestamp = Date.now();
+    let url = `${baseUrl}?phone=${encodedPhone}&t=${timestamp}`;
+    if (projectId) {
+        url += `&pid=${encodeURIComponent(projectId)}`;
+    }
+    if (employeeUid) {
+        url += `&uid=${encodeURIComponent(employeeUid)}`;
+    }
+    if (customToken) {
+        url += `&token=${encodeURIComponent(customToken)}`;
+    }
+    return url;
 }
 async function handleContactShare(chatId, contact) {
     const phoneNumber = contact.phone_number;
@@ -158,8 +184,7 @@ async function handleContactShare(chatId, contact) {
             const { employee, projectName } = result;
             const updateSuccess = await updateEmployeeTelegramChatID(employee.id, chatId, projectName);
             if (updateSuccess) {
-                const appUrl = generateAppUrl(normalizedPhone);
-                await sendAppLink(chatId, appUrl);
+                await sendAppLink(chatId, normalizedPhone, projectName, employee.uid);
                 console.log(`Successfully linked employee ${employee.id} to chat ${chatId}`);
             }
             else {

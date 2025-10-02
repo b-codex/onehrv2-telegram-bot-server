@@ -6,5 +6,5 @@ export declare function sendMessage(chatId: number, text: string, keyboard?: Inl
 }): Promise<TelegramBot.Message>;
 export declare function removeKeyboard(chatId: number): Promise<TelegramBot.Message>;
 export declare function sendContactRequest(chatId: number): Promise<TelegramBot.Message>;
-export declare function sendAppLink(chatId: number, appUrl: string): Promise<TelegramBot.Message>;
+export declare function sendAppLink(chatId: number, phoneNumber: string, projectName: string, employeeUid: string): Promise<TelegramBot.Message>;
 //# sourceMappingURL=bot.d.ts.map

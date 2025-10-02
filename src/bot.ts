@@ -1,6 +1,7 @@
 // Telegram Bot implementation with node-telegram-bot-api for polling support
 import { getHealthyDbInstances, retryDatabaseOperation, employeeCache } from './firebase-config';
 import { getTimestamp } from './util/dayjs_format';
+import { generateEmployeeAuthToken } from './services/auth-token.service';
 import {
     Contact,
     InlineKeyboardMarkup,
@@ -109,34 +110,75 @@ export async function sendContactRequest(chatId: number): Promise<TelegramBot.Me
     );
 }
 
-// Send app link message
-export async function sendAppLink(chatId: number, appUrl: string): Promise<TelegramBot.Message> {
-    // Send success message with keyboard removal
-    await sendMessage(
-        chatId,
-        '✅ Phone verified and linked to your employee account!',
-        { remove_keyboard: true }
-    );
+// Send app link message with authentication data
+export async function sendAppLink(
+    chatId: number,
+    phoneNumber: string,
+    projectName: string,
+    employeeUid: string
+): Promise<TelegramBot.Message> {
+    try {
+        // Generate authentication token for the employee
+        const authData = await generateEmployeeAuthToken(employeeUid, projectName, phoneNumber);
 
-    // Send app link with inline keyboard
-    return sendMessage(
-        chatId,
-        '⬇️ Click below to open your oneHR dashboard:',
-        {
-            inline_keyboard: [
-                [{ text: '🚀 Open oneHR App', web_app: { url: appUrl } }]
-            ],
-        }
-    );
+        // Generate app URL with authentication parameters
+        const appUrl = generateAppUrl(
+            phoneNumber,
+            authData.projectId,
+            employeeUid,
+            authData.customToken
+        );
+
+        // Send success message with keyboard removal
+        await sendMessage(
+            chatId,
+            '✅ Phone verified and linked to your employee account!',
+            { remove_keyboard: true }
+        );
+
+        // Send app link with inline keyboard
+        return sendMessage(
+            chatId,
+            '⬇️ Click below to open your oneHR dashboard:',
+            {
+                inline_keyboard: [
+                    [{ text: '🚀 Open oneHR App', web_app: { url: appUrl } }]
+                ],
+            }
+        );
+    } catch (error) {
+        console.error('Error generating auth token for app link:', error);
+
+        // Fallback: Generate basic URL without authentication
+        const basicUrl = generateAppUrl(phoneNumber);
+
+        // Send error message with keyboard removal
+        await sendMessage(
+            chatId,
+            '✅ Phone verified! (Auto-login unavailable)',
+            { remove_keyboard: true }
+        );
+
+        // Send basic app link
+        return sendMessage(
+            chatId,
+            '⬇️ Click below to open your oneHR dashboard:',
+            {
+                inline_keyboard: [
+                    [{ text: '🚀 Open oneHR App', web_app: { url: basicUrl } }]
+                ],
+            }
+        );
+    }
 }
 
 // Phone number lookup across all Firebase projects
-async function findEmployeeByPhoneNumber(phoneNumber: string): Promise<{ employee: { id: string; [key: string]: unknown }; projectName: string } | null> {
+async function findEmployeeByPhoneNumber(phoneNumber: string): Promise<{ employee: { id: string; uid: string; [key: string]: unknown }; projectName: string } | null> {
     // Check cache first
     const cached = employeeCache.get(phoneNumber);
     if (cached) {
         console.log(`Cache hit for phone ${phoneNumber} in project ${cached.projectName}`);
-        return { employee: cached.data, projectName: cached.projectName };
+        return { employee: cached.data as { id: string; uid: string; [key: string]: unknown }, projectName: cached.projectName };
     }
 
     const healthyDbs = await getHealthyDbInstances();
@@ -155,12 +197,12 @@ async function findEmployeeByPhoneNumber(phoneNumber: string): Promise<{ employe
             if (!query.empty) {
                 const doc = query.docs[0];
                 if (doc && doc.exists) {
-                    const employee = { id: doc.id, ...doc.data() };
+                    const employee = { id: doc.id, uid: doc.data().uid, ...doc.data() };
 
                     // Cache the result
                     employeeCache.set(phoneNumber, employee, projectName);
 
-                    console.log(`Found employee ${employee.id} in project ${projectName}`);
+                    console.log(`Found employee ${employee.id} (UID: ${employee.uid}) in project ${projectName}`);
                     return { employee, projectName };
                 }
             }
@@ -197,11 +239,32 @@ async function updateEmployeeTelegramChatID(employeeId: string, chatId: number, 
     }
 }
 
-// Generate dynamic app URL with phone number
-function generateAppUrl(phoneNumber: string): string {
+// Generate dynamic app URL with authentication parameters
+function generateAppUrl(
+    phoneNumber: string,
+    projectId?: string,
+    employeeUid?: string,
+    customToken?: string
+): string {
     const baseUrl = process.env.WEB_APP_URL || 'https://your-default-app-url.com';
     const encodedPhone = encodeURIComponent(phoneNumber);
-    return `${baseUrl}?phone=${encodedPhone}&t=${Date.now()}`;
+    const timestamp = Date.now();
+
+    // Base URL with phone and timestamp
+    let url = `${baseUrl}?phone=${encodedPhone}&t=${timestamp}`;
+
+    // Add authentication parameters if available
+    if (projectId) {
+        url += `&pid=${encodeURIComponent(projectId)}`;
+    }
+    if (employeeUid) {
+        url += `&uid=${encodeURIComponent(employeeUid)}`;
+    }
+    if (customToken) {
+        url += `&token=${encodeURIComponent(customToken)}`;
+    }
+
+    return url;
 }
 
 // Handle contact sharing
@@ -226,11 +289,8 @@ async function handleContactShare(chatId: number, contact: Contact): Promise<voi
             const updateSuccess = await updateEmployeeTelegramChatID(employee.id, chatId, projectName);
 
             if (updateSuccess) {
-                // Generate app URL with phone number
-                const appUrl = generateAppUrl(normalizedPhone);
-
-                // Send success message with app link
-                await sendAppLink(chatId, appUrl);
+                // Send success message with app link (includes auth token generation)
+                await sendAppLink(chatId, normalizedPhone, projectName, employee.uid);
                 console.log(`Successfully linked employee ${employee.id} to chat ${chatId}`);
             } else {
                 await sendMessage(chatId, '❌ Failed to link your account. Please try again or contact support.');

@@ -110,7 +110,7 @@ class EmployeeCache {
     private cache = new Map<string, CacheEntry>();
     private readonly TTL = 5 * 60 * 1000; // 5 minutes TTL
 
-    set(phoneNumber: string, data: { id: string;[key: string]: unknown }, projectName: string): void {
+    set(phoneNumber: string, data: { id: string; uid: string; [key: string]: unknown }, projectName: string): void {
         this.cache.set(phoneNumber, {
             data,
             timestamp: Date.now(),
@@ -118,7 +118,7 @@ class EmployeeCache {
         });
     }
 
-    get(phoneNumber: string): { data: { id: string;[key: string]: unknown }; projectName: string } | null {
+    get(phoneNumber: string): { data: { id: string; uid: string; [key: string]: unknown }; projectName: string } | null {
         const entry = this.cache.get(phoneNumber);
         if (!entry) return null;
 
@@ -128,7 +128,7 @@ class EmployeeCache {
             return null;
         }
 
-        return { data: entry.data, projectName: entry.projectName };
+        return { data: entry.data as { id: string; uid: string; [key: string]: unknown }, projectName: entry.projectName };
     }
 
     clear(): void {
