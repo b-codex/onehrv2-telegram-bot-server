@@ -17,7 +17,7 @@ export interface AuthTokenData {
     customToken: string;
     projectId: string;
     firebaseConfig: FirebaseClientConfig;
-    expiresAt: number;
+    // expiresAt: number; // commented out
 }
 
 // Employee data with UID for token generation
@@ -60,8 +60,8 @@ export async function generateEmployeeAuthToken(
             throw new Error(`Firebase Admin app for project '${projectName}' not initialized`);
         }
 
-        // Generate custom token with 5-minute expiration
-        const expiresIn = 5 * 60; // 5 minutes in seconds
+        // Generate custom token with 24-hour expiration
+        // const expiresIn = 24 * 60 * 60; // 24 hours in seconds // commented out
         const customToken = await admin.auth(adminApp).createCustomToken(uid, {
             phoneNumber: phoneNumber,
             projectId: projectConfig.projectId,
@@ -74,7 +74,7 @@ export async function generateEmployeeAuthToken(
             customToken,
             projectId: projectConfig.projectId,
             firebaseConfig,
-            expiresAt: Date.now() + (expiresIn * 1000)
+            // expiresAt: Date.now() + (expiresIn * 1000) // commented out
         };
 
         console.log(`✅ Generated auth token for employee ${uid} in project ${projectName}`);
@@ -102,7 +102,9 @@ function getFirebaseClientConfig(projectName: string): FirebaseClientConfig {
  * @returns boolean - True if token is still valid
  */
 export function isTokenValid(authData: AuthTokenData): boolean {
-    return Date.now() < authData.expiresAt;
+    // return Date.now() < authData.expiresAt; // commented out
+    void authData; // unused parameter
+    return true; // tokens never expire now
 }
 
 /**

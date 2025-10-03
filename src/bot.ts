@@ -11,6 +11,16 @@ import {
 } from './types/telegram';
 import TelegramBot from 'node-telegram-bot-api';
 
+// In-memory storage for chat sessions
+interface ChatSession {
+    phoneNumber: string;
+    projectName: string;
+    employeeUid: string;
+    employeeId: string;
+}
+
+const chatSessions = new Map<number, ChatSession>();
+
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
 if (!BOT_TOKEN) {
@@ -61,6 +71,70 @@ bot.onText(/\/test/, (msg: TelegramMessage) => {
     const chatId = msg.chat.id;
     console.log(`🔔 RECEIVED /test command from chat ${chatId}`);
     sendMessage(chatId, '✅ Bot is working!');
+});
+
+bot.onText(/\/app/, async (msg: TelegramMessage) => {
+    const chatId = msg.chat.id;
+    console.log(`🔔 RECEIVED /app command from chat ${chatId}`);
+
+    const session = chatSessions.get(chatId);
+
+    if (!session) {
+        sendMessage(chatId, '❌ No active session found. Please use /start and share your phone number first.');
+        return;
+    }
+
+    try {
+        // Generate authentication token for the employee
+        const authData = await generateEmployeeAuthToken(session.employeeUid, session.projectName, session.phoneNumber);
+
+        // Generate app URL with authentication parameters
+        const appUrl = generateAppUrl(
+            session.phoneNumber,
+            session.projectName,  // Use environment prefix instead of project ID
+            session.employeeUid,
+            authData.customToken
+        );
+
+        // Calculate expiration time (24 hours from now)
+        // const expirationTime = new Date(Date.now() + 24 * 60 * 60 * 1000);
+        // const formattedExpiration = expirationTime.toLocaleTimeString('en-US', {
+        //     hour: '2-digit',
+        //     minute: '2-digit',
+        //     hour12: true,
+        //     month: 'short',
+        //     day: 'numeric'
+        // });
+
+        // Send app link with inline keyboard (skip phone verification message)
+        await sendMessage(
+            chatId,
+            `⬇️ Click below to open your oneHR dashboard:\n\n💡 Use /app if this doesn't work`,
+            {
+                inline_keyboard: [
+                    [{ text: '🚀 Open oneHR App', web_app: { url: appUrl } }]
+                ],
+            }
+        );
+
+        console.log(`Successfully regenerated app link for chat ${chatId}`);
+    } catch (error) {
+        console.error('Error regenerating app link:', error);
+
+        // Fallback: Generate basic URL without authentication
+        const basicUrl = generateAppUrl(session.phoneNumber);
+
+        // Send basic app link
+        await sendMessage(
+            chatId,
+            '⬇️ Click below to open your oneHR dashboard:\n\n💡 Use /app command to get a new authenticated link',
+            {
+                inline_keyboard: [
+                    [{ text: '🚀 Open oneHR App', web_app: { url: basicUrl } }]
+                ],
+            }
+        );
+    }
 });
 
 console.log('🤖 Bot initialized successfully');
@@ -124,7 +198,7 @@ export async function sendAppLink(
         // Generate app URL with authentication parameters
         const appUrl = generateAppUrl(
             phoneNumber,
-            authData.projectId,
+            projectName,  // Use environment prefix instead of project ID
             employeeUid,
             authData.customToken
         );
@@ -136,10 +210,20 @@ export async function sendAppLink(
             { remove_keyboard: true }
         );
 
+        // Calculate expiration time (24 hours from now)
+        // const expirationTime = new Date(Date.now() + 24 * 60 * 60 * 1000);
+        // const formattedExpiration = expirationTime.toLocaleTimeString('en-US', {
+        //     hour: '2-digit',
+        //     minute: '2-digit',
+        //     hour12: true,
+        //     month: 'short',
+        //     day: 'numeric'
+        // });
+
         // Send app link with inline keyboard
         return sendMessage(
             chatId,
-            '⬇️ Click below to open your oneHR dashboard:',
+            `⬇️ Click below to open your oneHR dashboard:\n\n💡 Use /app if this doesn't work`,
             {
                 inline_keyboard: [
                     [{ text: '🚀 Open oneHR App', web_app: { url: appUrl } }]
@@ -162,7 +246,7 @@ export async function sendAppLink(
         // Send basic app link
         return sendMessage(
             chatId,
-            '⬇️ Click below to open your oneHR dashboard:',
+            '⬇️ Click below to open your oneHR dashboard:\n\n💡 Use /app command to get a new authenticated link',
             {
                 inline_keyboard: [
                     [{ text: '🚀 Open oneHR App', web_app: { url: basicUrl } }]
@@ -240,9 +324,10 @@ async function updateEmployeeTelegramChatID(employeeId: string, chatId: number, 
 }
 
 // Generate dynamic app URL with authentication parameters
+// @param projectName - Environment prefix (e.g., "development", "dev"), not Firebase project ID
 function generateAppUrl(
     phoneNumber: string,
-    projectId?: string,
+    projectName?: string,
     employeeUid?: string,
     customToken?: string
 ): string {
@@ -254,8 +339,8 @@ function generateAppUrl(
     let url = `${baseUrl}?phone=${encodedPhone}&t=${timestamp}`;
 
     // Add authentication parameters if available
-    if (projectId) {
-        url += `&pid=${encodeURIComponent(projectId)}`;
+    if (projectName) {
+        url += `&pid=${encodeURIComponent(projectName)}`;
     }
     if (employeeUid) {
         url += `&uid=${encodeURIComponent(employeeUid)}`;
@@ -289,6 +374,14 @@ async function handleContactShare(chatId: number, contact: Contact): Promise<voi
             const updateSuccess = await updateEmployeeTelegramChatID(employee.id, chatId, projectName);
 
             if (updateSuccess) {
+                // Store session data for future /app command usage
+                chatSessions.set(chatId, {
+                    phoneNumber: normalizedPhone,
+                    projectName,
+                    employeeUid: employee.uid,
+                    employeeId: employee.id
+                });
+
                 // Send success message with app link (includes auth token generation)
                 await sendAppLink(chatId, normalizedPhone, projectName, employee.uid);
                 console.log(`Successfully linked employee ${employee.id} to chat ${chatId}`);
