@@ -7,6 +7,8 @@ import bodyParser from "body-parser";
 import express from "express";
 // Import the bot to ensure it's initialized when server starts
 import './bot';
+// Import location monitoring service
+import { locationMonitoringService } from './services/location-monitoring.service';
 
 const app = express();
 app.use(bodyParser.json());
@@ -42,4 +44,8 @@ app.listen(port, () => {
     console.log(`🔥 Environment check - Firebase configs: ${Object.keys(process.env).filter(key => key.includes('FIREBASE')).length} found`);
     console.log(`🌐 Environment check - Web app URL: ${process.env.WEB_APP_URL ? 'Set' : 'Not set'}`);
     console.log(`📡 Polling status: Always Enabled (Primary Function)`);
+
+    // Start location monitoring service
+    locationMonitoringService.startMonitoring();
+    console.log(`📍 Location monitoring service: ${locationMonitoringService.isMonitoring() ? 'Started' : 'Failed to start'}`);
 });
