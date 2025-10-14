@@ -18,6 +18,10 @@ export interface EmployeeModel {
     personalPhoneNumber: string;
     personalEmail: string;
     telegramChatID: string | null;
+
+    // Current geolocation (Telegram live/static location)
+    currentLocation: EmployeeCurrentLocation | null;
+
     bankAccount: string;
     providentFundAccount: string;
     hourlyWage: number;
@@ -123,6 +127,21 @@ export interface EducationDetailModel {
     educationalLevel: string;
     school: string;
     schoolNotListed: boolean;
+}
+
+export interface EmployeeCurrentLocation {
+    latitude: number;
+    longitude: number;
+    accuracy: number | null;
+    heading: number | null;
+    speed: number | null;
+    source: 'telegram' | 'telegram_live';
+    isLive: boolean;
+    updatedAt: string;
+    liveMessageId: string | null;
+    liveChatId: string | null;
+    liveUntil: string | null;
+    endedAt: string | null;
 }
 
 export interface ExperienceDetailModel {

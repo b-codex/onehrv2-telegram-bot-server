@@ -1,6 +1,6 @@
 // Telegram Bot implementation with node-telegram-bot-api for polling support
 import { getHealthyDbInstances, retryDatabaseOperation, employeeCache } from './firebase-config';
-import { getTimestamp } from './util/dayjs_format';
+import { getTimestamp, timestampFormat } from './util/dayjs_format';
 import { generateEmployeeAuthToken } from './services/auth-token.service';
 import {
     Contact,
@@ -10,6 +10,8 @@ import {
     TelegramMessage
 } from './types/telegram';
 import TelegramBot from 'node-telegram-bot-api';
+import type { Location as TgLocation } from 'node-telegram-bot-api';
+import dayjs from 'dayjs';
 
 // In-memory storage for chat sessions
 interface ChatSession {
@@ -20,6 +22,55 @@ interface ChatSession {
 }
 
 const chatSessions = new Map<number, ChatSession>();
+
+// Track active live location sessions to infer when a user stops sharing
+interface LiveEntry {
+  chatId: number;
+  messageId: number;
+  employeeId: string;
+  projectName: string;
+  liveUntilMs: number | null;
+  lastUpdateMs: number;
+}
+
+const liveSessions = new Map<string, LiveEntry>();
+const LIVE_GRACE_MS = 2 * 60 * 1000; // 2 minutes grace after expected end or last update
+
+function makeLiveKey(chatId: number, messageId: number): string {
+  return `${chatId}:${messageId}`;
+}
+
+// Periodically finalize sessions that seem ended (no updates past threshold)
+setInterval(async () => {
+  const now = Date.now();
+  for (const [key, entry] of liveSessions.entries()) {
+    // End when EITHER duration has passed OR updates have gone stale for the grace window
+    const durationEnd = entry.liveUntilMs || Number.POSITIVE_INFINITY;
+    const staleEnd = entry.lastUpdateMs + LIVE_GRACE_MS;
+    const threshold = Math.min(durationEnd, staleEnd);
+    if (now >= threshold) {
+      try {
+        const dbs = await getHealthyDbInstances();
+        const db = dbs[entry.projectName];
+        if (db) {
+          const ts = getTimestamp();
+          await retryDatabaseOperation(async () => {
+            return db.collection('employee').doc(entry.employeeId).update({
+              ['currentLocation.isLive']: false,
+              ['currentLocation.endedAt']: ts,
+              lastChanged: ts
+            } as unknown as Record<string, unknown>);
+          }, 2, 1000, entry.projectName);
+        }
+      } catch (e) {
+        console.error('Live session finalization failed:', e);
+      } finally {
+        liveSessions.delete(key);
+      }
+    }
+  }
+}, 60000);
+
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
@@ -57,6 +108,18 @@ bot.on('message', (msg: TelegramMessage) => {
             phone_number: normalizedPhone,
             first_name: msg.from?.first_name || 'User'
         });
+    }
+
+    // Handle static location or start of a live location
+    if (msg.location) {
+        void handleLocationMessage(msg, false);
+    }
+});
+
+// Handle live location updates (Telegram sends edited_message updates)
+bot.on('edited_message', (msg: TelegramMessage) => {
+    if (msg.location) {
+        void handleLocationMessage(msg, true);
     }
 });
 
@@ -136,7 +199,13 @@ bot.onText(/\/app/, async (msg: TelegramMessage) => {
         );
     }
 });
-
+ 
+// Prompt user to share location or live location via command
+bot.onText(/\/(location|live)/, async (msg: TelegramMessage) => {
+    const chatId = msg.chat.id;
+    await sendLocationPrompt(chatId);
+});
+ 
 console.log('🤖 Bot initialized successfully');
 console.log('🔧 Bot token is valid and working');
 console.log('🚀 Starting polling with node-telegram-bot-api...');
@@ -152,6 +221,18 @@ export function createContactKeyboard(): ReplyKeyboardMarkup {
         resize_keyboard: true,
         one_time_keyboard: true
     };
+}
+
+// Send prompt explaining how to share LIVE location only
+export async function sendLocationPrompt(chatId: number): Promise<TelegramBot.Message> {
+    const text = [
+        '📡 Live location',
+        '',
+        'To share LIVE location: tap the paperclip/attach icon ➜ Location ➜ "Share My Live Location for…" and pick a duration.',
+        '',
+        'When you stop or the duration ends, the system will mark it as ended automatically.'
+    ].join('\n');
+    return sendMessage(chatId, text, { remove_keyboard: true });
 }
 
 // Send message with optional keyboard
@@ -173,7 +254,8 @@ export async function sendMessage(
 export async function removeKeyboard(chatId: number): Promise<TelegramBot.Message> {
     return bot.sendMessage(chatId, '.', { reply_markup: { remove_keyboard: true } });
 }
-
+ 
+ 
 // Send contact request message
 export async function sendContactRequest(chatId: number): Promise<TelegramBot.Message> {
     const keyboard = createContactKeyboard();
@@ -384,6 +466,8 @@ async function handleContactShare(chatId: number, contact: Contact): Promise<voi
 
                 // Send success message with app link (includes auth token generation)
                 await sendAppLink(chatId, normalizedPhone, projectName, employee.uid);
+                // Prompt to share live/static location
+                await sendLocationPrompt(chatId);
                 console.log(`Successfully linked employee ${employee.id} to chat ${chatId}`);
             } else {
                 await sendMessage(chatId, '❌ Failed to link your account. Please try again or contact support.');
@@ -406,8 +490,176 @@ async function handleContactShare(chatId: number, contact: Contact): Promise<voi
     }
 }
 
+// Live location handling utilities
+
+interface EmployeeRef {
+    employeeId: string;
+    projectName: string;
+    employeeUid: string;
+}
+
+// Lookup employee by telegramChatID across projects
+async function findEmployeeByChatId(chatId: number): Promise<{ employee: { id: string; uid: string; [key: string]: unknown }; projectName: string } | null> {
+    const healthyDbs = await getHealthyDbInstances();
+    for (const [projectName, db] of Object.entries(healthyDbs)) {
+        try {
+            const employeesRef = db.collection('employee');
+            const query = await retryDatabaseOperation(async () => {
+                return await employeesRef
+                    .where('telegramChatID', '==', chatId.toString())
+                    .limit(1)
+                    .get();
+            }, 2, 1000, projectName);
+
+            if (!query.empty) {
+                const doc = query.docs[0];
+                if (doc && doc.exists) {
+                    const employee = { id: doc.id, uid: doc.data().uid, ...doc.data() };
+                    return { employee, projectName };
+                }
+            }
+        } catch (error) {
+            console.error(`Error searching by chatId in ${projectName}:`, error);
+            continue;
+        }
+    }
+    return null;
+}
+
+// Ensure we have employee context for a given chat
+async function ensureEmployeeByChat(chatId: number): Promise<EmployeeRef | null> {
+    const session = chatSessions.get(chatId);
+    if (session) {
+        return { employeeId: session.employeeId, projectName: session.projectName, employeeUid: session.employeeUid };
+    }
+    const found = await findEmployeeByChatId(chatId);
+    if (found) {
+        return { employeeId: found.employee.id, projectName: found.projectName, employeeUid: found.employee.uid };
+    }
+    return null;
+}
+
+// Persist the latest location and append a history log
+async function saveEmployeeLocation(projectName: string, employeeId: string, chatId: number, messageId: number, location: TgLocation, livePeriodSeconds: number | null, isEdit: boolean): Promise<void> {
+    const db = (await getHealthyDbInstances())[projectName];
+    if (!db) {
+        throw new Error(`Database for project ${projectName} is not healthy`);
+    }
+
+    const nowTs = getTimestamp();
+    const key = makeLiveKey(chatId, messageId);
+    let isLive = false;
+    let liveUntilMs: number | null = null;
+
+    if (typeof livePeriodSeconds === 'number' && livePeriodSeconds > 0) {
+        // Initial live location share with a known duration
+        isLive = true;
+        liveUntilMs = Date.now() + (livePeriodSeconds * 1000);
+        liveSessions.set(key, {
+            chatId,
+            messageId,
+            employeeId,
+            projectName,
+            liveUntilMs,
+            lastUpdateMs: Date.now()
+        });
+    } else {
+        // Subsequent live updates may not include live_period, rely on tracker
+        const existing = liveSessions.get(key);
+        if (existing) {
+            isLive = true;
+            liveUntilMs = existing.liveUntilMs;
+            existing.lastUpdateMs = Date.now();
+            liveSessions.set(key, existing);
+        } else if (isEdit) {
+            // If we receive an edited_message with location but no tracker yet,
+            // treat it as a live session with unknown duration (until user stops)
+            isLive = true;
+            liveUntilMs = null;
+            liveSessions.set(key, {
+                chatId,
+                messageId,
+                employeeId,
+                projectName,
+                liveUntilMs,
+                lastUpdateMs: Date.now()
+            });
+        }
+    }
+
+    const liveUntil = liveUntilMs ? dayjs(liveUntilMs).format(timestampFormat) : null;
+
+    // Some clients may include heading/speed; guard with type checks
+    const heading = (location as unknown as { heading?: number }).heading;
+    const speed = (location as unknown as { speed?: number }).speed;
+    const accuracy = (location as unknown as { horizontal_accuracy?: number }).horizontal_accuracy;
+
+    const currentLocationData = {
+        latitude: location.latitude,
+        longitude: location.longitude,
+        accuracy: typeof accuracy === 'number' ? accuracy : null,
+        heading: typeof heading === 'number' ? heading : null,
+        speed: typeof speed === 'number' ? speed : null,
+        source: isLive ? 'telegram_live' : 'telegram',
+        isLive: isLive,
+        updatedAt: nowTs,
+        liveMessageId: String(messageId),
+        liveChatId: String(chatId),
+        liveUntil: liveUntil,
+        endedAt: null as string | null
+    };
+
+    await retryDatabaseOperation(async () => {
+        await db.collection('employee').doc(employeeId).update({
+            currentLocation: currentLocationData,
+            lastChanged: nowTs
+        });
+    }, 2, 1000, projectName);
+
+    // Append to history (best-effort)
+    const history = {
+        latitude: location.latitude,
+        longitude: location.longitude,
+        accuracy: typeof accuracy === 'number' ? accuracy : null,
+        heading: typeof heading === 'number' ? heading : null,
+        speed: typeof speed === 'number' ? speed : null,
+        source: currentLocationData.source,
+        timestamp: nowTs,
+        chatId: String(chatId),
+        messageId: String(messageId),
+        livePeriodSeconds: livePeriodSeconds ?? null
+    };
+
+    await retryDatabaseOperation(async () => {
+        await db.collection('employee').doc(employeeId).collection('locationLogs').add(history);
+    }, 2, 1000, projectName);
+}
+
+// Handle a location message or an update of a live location
+async function handleLocationMessage(msg: TelegramMessage, isEdit: boolean): Promise<void> {
+    try {
+        const chatId = msg.chat.id;
+        const messageId = msg.message_id;
+        const loc = msg.location as TgLocation | undefined;
+        if (!loc) return;
+
+        // live_period can arrive either on the message or (rarely) bundled inside location
+        const livePeriodSeconds = (msg as unknown as { live_period?: number }).live_period ??
+            (loc as unknown as { live_period?: number }).live_period ??
+            null;
+
+        const context = await ensureEmployeeByChat(chatId);
+        if (!context) {
+            console.warn(`No employee context for chat ${chatId}; ignoring ${isEdit ? 'live location update' : 'location message'}.`);
+            return;
+        }
+
+        await saveEmployeeLocation(context.projectName, context.employeeId, chatId, messageId, loc, livePeriodSeconds, isEdit);
+    } catch (error) {
+        console.error('Failed to handle location message:', error);
+    }
+}
+
 // Initialize bot handlers
 console.log('Initializing Telegram bot handlers...');
-
-
 console.log('Telegram bot handlers initialized successfully');
