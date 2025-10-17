@@ -21,54 +21,56 @@ interface ChatSession {
     employeeId: string;
 }
 
+const isDev = process.env.NODE_ENV === "development";
+
 const chatSessions = new Map<number, ChatSession>();
 
 // Track active live location sessions to infer when a user stops sharing
 interface LiveEntry {
-  chatId: number;
-  messageId: number;
-  employeeId: string;
-  projectName: string;
-  liveUntilMs: number | null;
-  lastUpdateMs: number;
+    chatId: number;
+    messageId: number;
+    employeeId: string;
+    projectName: string;
+    liveUntilMs: number | null;
+    lastUpdateMs: number;
 }
 
 const liveSessions = new Map<string, LiveEntry>();
 const LIVE_GRACE_MS = 2 * 60 * 1000; // 2 minutes grace after expected end or last update
 
 function makeLiveKey(chatId: number, messageId: number): string {
-  return `${chatId}:${messageId}`;
+    return `${chatId}:${messageId}`;
 }
 
 // Periodically finalize sessions that seem ended (no updates past threshold)
 setInterval(async () => {
-  const now = Date.now();
-  for (const [key, entry] of liveSessions.entries()) {
-    // End when EITHER duration has passed OR updates have gone stale for the grace window
-    const durationEnd = entry.liveUntilMs || Number.POSITIVE_INFINITY;
-    const staleEnd = entry.lastUpdateMs + LIVE_GRACE_MS;
-    const threshold = Math.min(durationEnd, staleEnd);
-    if (now >= threshold) {
-      try {
-        const dbs = await getHealthyDbInstances();
-        const db = dbs[entry.projectName];
-        if (db) {
-          const ts = getTimestamp();
-          await retryDatabaseOperation(async () => {
-            return db.collection('employee').doc(entry.employeeId).update({
-              ['currentLocation.isLive']: false,
-              ['currentLocation.endedAt']: ts,
-              lastChanged: ts
-            } as unknown as Record<string, unknown>);
-          }, 2, 1000, entry.projectName);
+    const now = Date.now();
+    for (const [key, entry] of liveSessions.entries()) {
+        // End when EITHER duration has passed OR updates have gone stale for the grace window
+        const durationEnd = entry.liveUntilMs || Number.POSITIVE_INFINITY;
+        const staleEnd = entry.lastUpdateMs + LIVE_GRACE_MS;
+        const threshold = Math.min(durationEnd, staleEnd);
+        if (now >= threshold) {
+            try {
+                const dbs = await getHealthyDbInstances();
+                const db = dbs[entry.projectName];
+                if (db) {
+                    const ts = getTimestamp();
+                    await retryDatabaseOperation(async () => {
+                        return db.collection('employee').doc(entry.employeeId).update({
+                            ['currentLocation.isLive']: false,
+                            ['currentLocation.endedAt']: ts,
+                            lastChanged: ts
+                        } as unknown as Record<string, unknown>);
+                    }, 2, 1000, entry.projectName);
+                }
+            } catch (e) {
+                console.error('Live session finalization failed:', e);
+            } finally {
+                liveSessions.delete(key);
+            }
         }
-      } catch (e) {
-        console.error('Live session finalization failed:', e);
-      } finally {
-        liveSessions.delete(key);
-      }
     }
-  }
 }, 60000);
 
 
@@ -169,10 +171,16 @@ bot.onText(/\/app/, async (msg: TelegramMessage) => {
         //     day: 'numeric'
         // });
 
+        if (isDev)
+            sendMessage(
+                chatId,
+                `⬇️ Direct Link: \n\n ${appUrl}`,
+            );
+
         // Send app link with inline keyboard (skip phone verification message)
         await sendMessage(
             chatId,
-            `⬇️ Click below to open your oneHR dashboard:\n\n💡 Use /app if this doesn't work`,
+            `⬇️ Click below to open your oneHR dashboard:\n\n💡 Use /app if this doesn't work\n\n ⚠️ This link expires after 1 hour!`,
             {
                 inline_keyboard: [
                     [{ text: '🚀 Open oneHR App', web_app: { url: appUrl } }]
@@ -190,7 +198,7 @@ bot.onText(/\/app/, async (msg: TelegramMessage) => {
         // Send basic app link
         await sendMessage(
             chatId,
-            '⬇️ Click below to open your oneHR dashboard:\n\n💡 Use /app command to get a new authenticated link',
+            '⬇️ Click below to open your oneHR dashboard:\n\n💡 Use /app command to get a new authenticated link\n\n ⚠️ This link expires after 1 hour!',
             {
                 inline_keyboard: [
                     [{ text: '🚀 Open oneHR App', web_app: { url: basicUrl } }]
@@ -199,13 +207,13 @@ bot.onText(/\/app/, async (msg: TelegramMessage) => {
         );
     }
 });
- 
+
 // Prompt user to share location or live location via command
 bot.onText(/\/(location|live)/, async (msg: TelegramMessage) => {
     const chatId = msg.chat.id;
     await sendLocationPrompt(chatId);
 });
- 
+
 console.log('🤖 Bot initialized successfully');
 console.log('🔧 Bot token is valid and working');
 console.log('🚀 Starting polling with node-telegram-bot-api...');
@@ -254,8 +262,8 @@ export async function sendMessage(
 export async function removeKeyboard(chatId: number): Promise<TelegramBot.Message> {
     return bot.sendMessage(chatId, '.', { reply_markup: { remove_keyboard: true } });
 }
- 
- 
+
+
 // Send contact request message
 export async function sendContactRequest(chatId: number): Promise<TelegramBot.Message> {
     const keyboard = createContactKeyboard();
@@ -302,10 +310,16 @@ export async function sendAppLink(
         //     day: 'numeric'
         // });
 
+        if (isDev)
+            sendMessage(
+                chatId,
+                `⬇️ Direct Link: \n\n ${appUrl}`,
+            );
+
         // Send app link with inline keyboard
         return sendMessage(
             chatId,
-            `⬇️ Click below to open your oneHR dashboard:\n\n💡 Use /app if this doesn't work`,
+            `⬇️ Click below to open your oneHR dashboard:\n\n💡 Use /app if this doesn't work\n\n ⚠️ This link expires after 1 hour!`,
             {
                 inline_keyboard: [
                     [{ text: '🚀 Open oneHR App', web_app: { url: appUrl } }]
@@ -328,7 +342,7 @@ export async function sendAppLink(
         // Send basic app link
         return sendMessage(
             chatId,
-            '⬇️ Click below to open your oneHR dashboard:\n\n💡 Use /app command to get a new authenticated link',
+            '⬇️ Click below to open your oneHR dashboard:\n\n💡 Use /app command to get a new authenticated link\n\n ⚠️ This link expires after 1 hour!',
             {
                 inline_keyboard: [
                     [{ text: '🚀 Open oneHR App', web_app: { url: basicUrl } }]
@@ -339,12 +353,12 @@ export async function sendAppLink(
 }
 
 // Phone number lookup across all Firebase projects
-async function findEmployeeByPhoneNumber(phoneNumber: string): Promise<{ employee: { id: string; uid: string; [key: string]: unknown }; projectName: string } | null> {
+async function findEmployeeByPhoneNumber(phoneNumber: string): Promise<{ employee: { id: string; uid: string;[key: string]: unknown }; projectName: string } | null> {
     // Check cache first
     const cached = employeeCache.get(phoneNumber);
     if (cached) {
         console.log(`Cache hit for phone ${phoneNumber} in project ${cached.projectName}`);
-        return { employee: cached.data as { id: string; uid: string; [key: string]: unknown }, projectName: cached.projectName };
+        return { employee: cached.data as { id: string; uid: string;[key: string]: unknown }, projectName: cached.projectName };
     }
 
     const healthyDbs = await getHealthyDbInstances();
@@ -499,7 +513,7 @@ interface EmployeeRef {
 }
 
 // Lookup employee by telegramChatID across projects
-async function findEmployeeByChatId(chatId: number): Promise<{ employee: { id: string; uid: string; [key: string]: unknown }; projectName: string } | null> {
+async function findEmployeeByChatId(chatId: number): Promise<{ employee: { id: string; uid: string;[key: string]: unknown }; projectName: string } | null> {
     const healthyDbs = await getHealthyDbInstances();
     for (const [projectName, db] of Object.entries(healthyDbs)) {
         try {
