@@ -601,7 +601,7 @@ async function saveEmployeeLocation(projectName: string, employeeId: string, cha
         }
     }
 
-    const liveUntil = liveUntilMs ? dayjs(liveUntilMs).format(timestampFormat) : null;
+    const liveUntil = liveUntilMs ? dayjs.tz(liveUntilMs).format(timestampFormat) : null;
 
     // Some clients may include heading/speed; guard with type checks
     const heading = (location as unknown as { heading?: number }).heading;
