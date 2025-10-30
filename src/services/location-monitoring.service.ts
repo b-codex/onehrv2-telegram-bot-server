@@ -118,8 +118,8 @@ export class LocationMonitoringService {
             try {
                 // Find attendance records with lastClockInTimestamp set (indicating currently clocked in)
                 const attendanceRef = db.collection('attendance');
-                const currentYear = dayjs().year();
-                const currentMonth = dayjs().format('MMMM') as "January" | "February" | "March" | "April" | "May" | "June" | "July" | "August" | "September" | "October" | "November" | "December";
+                const currentYear = dayjs.tz().year();
+                const currentMonth = dayjs.tz().format('MMMM') as "January" | "February" | "March" | "April" | "May" | "June" | "July" | "August" | "September" | "October" | "November" | "December";
 
                 // Fetch all attendance records for current month and filter client-side
                 // This avoids needing composite indexes on multiple fields across many databases
@@ -197,12 +197,12 @@ export class LocationMonitoringService {
         }
 
         // Check if employee was recently auto clocked out (prevent spam)
-        const lastClockOut = attendance.values[dayjs(attendance.lastClockInTimestamp).date() - 1]?.workedHours
+        const lastClockOut = attendance.values[dayjs.tz(attendance.lastClockInTimestamp).date() - 1]?.workedHours
             .filter(wh => wh.type === 'Clock Out')
-            .sort((a, b) => dayjs(b.timestamp).diff(dayjs(a.timestamp)))[0];
+            .sort((a, b) => dayjs.tz(b.timestamp).diff(dayjs.tz(a.timestamp)))[0];
 
         if (lastClockOut) {
-            const minutesSinceLastClockOut = dayjs().diff(dayjs(lastClockOut.timestamp), 'minute');
+            const minutesSinceLastClockOut = dayjs.tz().diff(dayjs.tz(lastClockOut.timestamp), 'minute');
             if (minutesSinceLastClockOut < this.CHECK_INTERVAL_MINUTES) {
                 console.log(`Skipping auto clock-out for ${employee.uid}: recently clocked out (${minutesSinceLastClockOut} minutes ago)`);
                 return null;
@@ -246,12 +246,12 @@ export class LocationMonitoringService {
 
         try {
             // Use the existing clockInOrOut logic but adapted for server-side
-            const clockInDate = dayjs(attendance.lastClockInTimestamp);
-            const clockOutTimestamp = dayjs().toISOString();
+            const clockInDate = dayjs.tz(attendance.lastClockInTimestamp);
+            const clockOutTimestamp = dayjs.tz().toISOString();
             const clockInDayIndex = clockInDate.date() - 1;
 
             // Calculate hours worked
-            const hoursWorked = dayjs().diff(dayjs(attendance.lastClockInTimestamp), 'hours', true);
+            const hoursWorked = dayjs.tz().diff(dayjs.tz(attendance.lastClockInTimestamp), 'hours', true);
 
             // Get worked hours array
             const workedHours = attendance.values[clockInDayIndex]?.workedHours || [];
@@ -261,7 +261,7 @@ export class LocationMonitoringService {
                 id: crypto.randomUUID(),
                 timestamp: clockOutTimestamp,
                 type: 'Clock Out',
-                hour: dayjs().format('h:mm A')
+                hour: dayjs.tz().format('h:mm A')
             };
 
             workedHours.push(clockOutEntry);

@@ -50,8 +50,8 @@ export function validateEmployeeLocation(
     }
 
     // Check location age
-    const locationTime = dayjs(employeeLocation.updatedAt);
-    const now = dayjs();
+    const locationTime = dayjs.tz(employeeLocation.updatedAt);
+    const now = dayjs.tz();
     const ageMinutes = now.diff(locationTime, 'minute');
 
     if (ageMinutes > maxAgeMinutes) {
@@ -68,7 +68,7 @@ export function validateEmployeeLocation(
     // For live locations, check if they're still active
     if (employeeLocation.isLive) {
         if (employeeLocation.liveUntil) {
-            const liveUntil = dayjs(employeeLocation.liveUntil);
+            const liveUntil = dayjs.tz(employeeLocation.liveUntil);
             if (now.isAfter(liveUntil)) {
                 return {
                     isValid: false,
@@ -282,8 +282,8 @@ export function hasValidLocation(
     }
 
     // Check location age
-    const locationTime = dayjs(employeeLocation.updatedAt);
-    const now = dayjs();
+    const locationTime = dayjs.tz(employeeLocation.updatedAt);
+    const now = dayjs.tz();
     const ageMinutes = now.diff(locationTime, 'minute');
 
     if (ageMinutes > maxAgeMinutes) {
@@ -292,7 +292,7 @@ export function hasValidLocation(
 
     // For live locations, check if they're still active
     if (employeeLocation.isLive && employeeLocation.liveUntil) {
-        const liveUntil = dayjs(employeeLocation.liveUntil);
+        const liveUntil = dayjs.tz(employeeLocation.liveUntil);
         if (now.isAfter(liveUntil)) {
             return false;
         }

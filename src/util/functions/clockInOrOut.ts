@@ -18,12 +18,12 @@ export const clockInOrOut = async (
 
     // Calculate daily working hours for the current day
     const dailyWorkingHour: number = calculateDailyWorkingHours(
-        dayjs(),
+        dayjs.tz(),
         shiftType,
         shiftHours
     );
 
-    if (dailyWorkingHour == 0) {
+    if (dailyWorkingHour === 0) {
         return {
             status: false,
             error: "Set up shift type and associate to employee",
@@ -31,7 +31,7 @@ export const clockInOrOut = async (
     }
 
     // Determine the current day's index in the `values` array (zero-based)
-    const currentDayIndex = type == 'Clock In' ? dayjs().date() - 1 : dayjs(newData.lastClockInTimestamp).date() - 1;
+    const currentDayIndex = type === 'Clock In' ? dayjs.tz().date() - 1 : dayjs(newData.lastClockInTimestamp).date() - 1;
 
     // Get the existing worked hours for the day, or initialize an empty array
     const workedHours: WorkedHoursModel[] =
@@ -39,7 +39,7 @@ export const clockInOrOut = async (
 
     if (type === "Clock In") {
         // Save clock-in timestamp
-        const clockInTimestamp = dayjs().toISOString();
+        const clockInTimestamp = dayjs.tz().toISOString();
 
         // Initialize daily attendance if it doesn't exist
         if (!newData.values[currentDayIndex]) {
@@ -61,7 +61,7 @@ export const clockInOrOut = async (
             id: crypto.randomUUID(),
             timestamp: clockInTimestamp,
             type: "Clock In",
-            hour: dayjs().format("h:mm A"),
+            hour: dayjs.tz().format("h:mm A"),
         });
 
         // Update the current day's worked hours with the clock-in entry
@@ -77,7 +77,7 @@ export const clockInOrOut = async (
 
         // Use the clock-in timestamp to determine the working day
         const clockInDate = dayjs(newData.lastClockInTimestamp);
-        const clockOutTimestamp = dayjs().toISOString();
+        const clockOutTimestamp = dayjs.tz().toISOString();
 
         // Determine the day index based on the clock-in date
         const clockInDayIndex = clockInDate.date() - 1;
@@ -98,7 +98,7 @@ export const clockInOrOut = async (
         }
 
         // Calculate the hours worked since the last clock-in
-        const hoursWorked = dayjs().diff(
+        const hoursWorked = dayjs.tz().diff(
             dayjs(newData.lastClockInTimestamp),
             "hours",
             true
@@ -109,7 +109,7 @@ export const clockInOrOut = async (
             id: crypto.randomUUID(),
             timestamp: clockOutTimestamp,
             type: "Clock Out",
-            hour: dayjs().format("h:mm A"),
+            hour: dayjs.tz().format("h:mm A"),
         });
 
         // Update daily and monthly worked hours

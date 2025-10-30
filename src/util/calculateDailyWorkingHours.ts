@@ -21,7 +21,7 @@ function calculateDailyWorkingHours(
 ): number {
     let totalHours = 0;
 
-    const dayOfTheWeek = days[currentDay.day()];
+    const dayOfTheWeek = days[currentDay.tz().day()];
     const workingDay = shiftType?.workingDays?.find(
         (day) => day.dayOfTheWeek === dayOfTheWeek
     );
