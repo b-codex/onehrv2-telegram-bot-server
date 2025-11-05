@@ -66,7 +66,7 @@ export async function checkDatabaseHealth(db: firestore.Firestore, projectName: 
         const testQuery = db.collection('_health_check').limit(1);
         await testQuery.get();
         const duration = Date.now() - startTime;
-        console.log(`Database ${projectName} health check: OK (${duration}ms)`);
+        // console.log(`Database ${projectName} health check: OK (${duration}ms)`);
         dbPerformanceMonitor.recordQuery(projectName, duration, true);
         return true;
     } catch (error) {
@@ -84,7 +84,7 @@ export async function getHealthyDbInstances(): Promise<Record<string, firestore.
     const healthyInstances: Record<string, firestore.Firestore> = {};
 
     for (const [projectName, db] of Object.entries(dbInstances)) {
-        console.log(`Checking health for project: ${projectName}`);
+        // console.log(`Checking health for project: ${projectName}`);
         if (await checkDatabaseHealth(db, projectName)) {
             healthyInstances[projectName] = db;
             console.log(`✅ Project ${projectName} is healthy`);

@@ -1,6 +1,6 @@
 // Telegram Bot implementation with node-telegram-bot-api for polling support
 import { getHealthyDbInstances, retryDatabaseOperation, employeeCache } from './firebase-config';
-import { getTimestamp, timestampFormat } from './util/dayjs_format';
+import { getUTCTimestamp, timestampFormat } from './util/dayjs_format';
 import { generateEmployeeAuthToken } from './services/auth-token.service';
 import {
     Contact,
@@ -55,7 +55,7 @@ setInterval(async () => {
                 const dbs = await getHealthyDbInstances();
                 const db = dbs[entry.projectName];
                 if (db) {
-                    const ts = getTimestamp();
+                    const ts = getUTCTimestamp();
                     await retryDatabaseOperation(async () => {
                         return db.collection('employee').doc(entry.employeeId).update({
                             ['currentLocation.isLive']: false,
@@ -72,7 +72,6 @@ setInterval(async () => {
         }
     }
 }, 60000);
-
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
@@ -407,7 +406,7 @@ async function updateEmployeeTelegramChatID(employeeId: string, chatId: number, 
         await retryDatabaseOperation(async () => {
             return await db.collection('employee').doc(employeeId).update({
                 telegramChatID: chatId.toString(),
-                lastChanged: getTimestamp()
+                lastChanged: getUTCTimestamp()
             });
         }, 2, 1000, projectName);
 
@@ -560,7 +559,7 @@ async function saveEmployeeLocation(projectName: string, employeeId: string, cha
         throw new Error(`Database for project ${projectName} is not healthy`);
     }
 
-    const nowTs = getTimestamp();
+    const nowTs = getUTCTimestamp();
     const key = makeLiveKey(chatId, messageId);
     let isLive = false;
     let liveUntilMs: number | null = null;

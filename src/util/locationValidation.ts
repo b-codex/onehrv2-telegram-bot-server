@@ -5,6 +5,7 @@
 
 import dayjs from 'dayjs';
 import { EmployeeCurrentLocation } from '../models/employee';
+import { formatTimestamp, timestampFormat } from './dayjs_format';
 
 export interface LocationValidationResult {
     isValid: boolean;
@@ -50,9 +51,10 @@ export function validateEmployeeLocation(
     }
 
     // Check location age
-    const locationTime = dayjs.tz(employeeLocation.updatedAt);
-    const now = dayjs.tz();
+    const locationTime = dayjs.utc(employeeLocation.updatedAt);
+    const now = dayjs.utc();
     const ageMinutes = now.diff(locationTime, 'minute');
+    console.log("updatedAt: ", locationTime.format(timestampFormat), " now: ", now.format(timestampFormat), " diff: ", ageMinutes);
 
     if (ageMinutes > maxAgeMinutes) {
         return {
@@ -68,7 +70,7 @@ export function validateEmployeeLocation(
     // For live locations, check if they're still active
     if (employeeLocation.isLive) {
         if (employeeLocation.liveUntil) {
-            const liveUntil = dayjs.tz(employeeLocation.liveUntil);
+            const liveUntil = dayjs.utc(employeeLocation.liveUntil);
             if (now.isAfter(liveUntil)) {
                 return {
                     isValid: false,
@@ -219,47 +221,104 @@ export function validateEmployeeLocationAndArea(
     workingArea: string,
     maxAgeMinutes: number = 30
 ): LocationValidationResult {
-    // First validate the location itself
-    const locationValidation = validateEmployeeLocation(employeeLocation, maxAgeMinutes);
-    if (!locationValidation.isValid) {
-        return locationValidation;
-    }
-
-    // Parse working area
-    const parsedArea = parseWorkingArea(workingArea);
-    if (!parsedArea) {
+    console.log(`******* employee location: `, employeeLocation);
+    // Check if location exists at all
+    if (!employeeLocation) {
         return {
             isValid: false,
-            error: 'Invalid working area configuration. Please contact your administrator.',
-            accuracy: locationValidation.accuracy ?? null,
-            coordinates: locationValidation.coordinates ? locationValidation.coordinates : null,
-            locationAge: locationValidation.locationAge ?? null,
-            isLive: locationValidation.isLive ?? null,
+            error: 'No location data available. Please share your location first.',
+            accuracy: null,
+            coordinates: null,
+            locationAge: null,
+            isLive: null,
         };
     }
 
-    // Check if point is within working area
-    const point = locationValidation.coordinates!;
-    const isInside = isPointInMultiPolygon(point, parsedArea);
-
-    if (!isInside) {
+    // Check if location has ended (for live locations)
+    if (employeeLocation.endedAt) {
         return {
             isValid: false,
-            error: 'You are outside your designated working area. Clock in/out is only allowed within your assigned work location.',
-            accuracy: locationValidation.accuracy ?? null,
-            coordinates: point,
-            locationAge: locationValidation.locationAge ?? null,
-            isLive: locationValidation.isLive ?? null,
+            error: 'Location sharing has ended. Please share your location again.',
+            accuracy: null,
+            coordinates: null,
+            locationAge: null,
+            isLive: null,
         };
     }
 
-    return {
-        isValid: true,
-        accuracy: locationValidation.accuracy ?? null,
-        coordinates: point,
-        locationAge: locationValidation.locationAge ?? null,
-        isLive: locationValidation.isLive ?? null,
-    };
+    // Get location age for reference
+    const locationTime = dayjs.utc(employeeLocation.updatedAt);
+    const now = dayjs.utc();
+    const ageMinutes = now.diff(locationTime, 'minute');
+
+    console.log(`locationTime: ${formatTimestamp(locationTime)} now: ${formatTimestamp(now)} diff: ${ageMinutes}`);
+
+    // Check if location is live
+    const isLive = employeeLocation.isLive && (!employeeLocation.liveUntil || now.isBefore(dayjs.utc(employeeLocation.liveUntil)));
+
+    if (isLive) {
+        // Location is live - check if within working area
+        const coordinates: [number, number] = [employeeLocation.longitude, employeeLocation.latitude];
+
+        // Parse working area
+        const parsedArea = parseWorkingArea(workingArea);
+        if (!parsedArea) {
+            return {
+                isValid: false,
+                error: 'Invalid working area configuration. Please contact your administrator.',
+                accuracy: employeeLocation.accuracy || 0,
+                coordinates,
+                locationAge: ageMinutes,
+                isLive: true,
+            };
+        }
+
+        // Check if point is within working area
+        const isInside = isPointInMultiPolygon(coordinates, parsedArea);
+
+        if (!isInside) {
+            return {
+                isValid: false,
+                error: 'You are outside your designated working area. Clock in/out is only allowed within your assigned work location.',
+                accuracy: employeeLocation.accuracy || 0,
+                coordinates,
+                locationAge: ageMinutes,
+                isLive: true,
+            };
+        }
+
+        // Live location is within working area - valid
+        return {
+            isValid: true,
+            accuracy: employeeLocation.accuracy || 0,
+            coordinates,
+            locationAge: ageMinutes,
+            isLive: true,
+        };
+    } else {
+        // Location is not live (expired, never was live, or age check failed)
+        // Check if it's too old
+        if (ageMinutes > maxAgeMinutes) {
+            return {
+                isValid: false,
+                error: `Location data is too old (${ageMinutes} minutes). Please update your location.`,
+                accuracy: null,
+                coordinates: null,
+                locationAge: ageMinutes,
+                isLive: false,
+            };
+        }
+
+        // Location exists but is not live - should trigger auto clock-out
+        return {
+            isValid: false,
+            error: 'Location sharing is not active. Please share your live location.',
+            accuracy: employeeLocation.accuracy || 0,
+            coordinates: [employeeLocation.longitude, employeeLocation.latitude],
+            locationAge: ageMinutes,
+            isLive: false,
+        };
+    }
 }
 
 /**
@@ -282,8 +341,8 @@ export function hasValidLocation(
     }
 
     // Check location age
-    const locationTime = dayjs.tz(employeeLocation.updatedAt);
-    const now = dayjs.tz();
+    const locationTime = dayjs.utc(employeeLocation.updatedAt);
+    const now = dayjs.utc();
     const ageMinutes = now.diff(locationTime, 'minute');
 
     if (ageMinutes > maxAgeMinutes) {
@@ -292,7 +351,7 @@ export function hasValidLocation(
 
     // For live locations, check if they're still active
     if (employeeLocation.isLive && employeeLocation.liveUntil) {
-        const liveUntil = dayjs.tz(employeeLocation.liveUntil);
+        const liveUntil = dayjs.utc(employeeLocation.liveUntil);
         if (now.isAfter(liveUntil)) {
             return false;
         }

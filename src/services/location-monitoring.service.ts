@@ -1,11 +1,11 @@
-import { getHealthyDbInstances, retryDatabaseOperation } from '../firebase-config';
-import { validateEmployeeLocationAndArea } from '../util/locationValidation';
-import { AttendanceModel, WorkedHoursModel } from '../models/attendance';
-import { EmployeeModel } from '../models/employee';
-import { getTimestamp } from '../util/dayjs_format';
 import dayjs from 'dayjs';
 import { sendMessage } from '../bot';
+import { getHealthyDbInstances, retryDatabaseOperation } from '../firebase-config';
+import { AttendanceModel, WorkedHoursModel } from '../models/attendance';
+import { EmployeeModel } from '../models/employee';
 import getEmployeeFullName from '../util/getEmployeeFullName';
+import { validateEmployeeLocationAndArea } from '../util/locationValidation';
+import type { firestore } from 'firebase-admin';
 
 interface ClockedInEmployee {
     employee: EmployeeModel;
@@ -17,8 +17,10 @@ interface AutoClockOutResult {
     success: boolean;
     employeeId: string;
     employeeName: string;
-    managerChatId?: string | null;
+    employeeChatID: string | null;
+    managerChatID: string | null;
     error?: string | null;
+    reason?: string | null;
 }
 
 export class LocationMonitoringService {
@@ -30,10 +32,11 @@ export class LocationMonitoringService {
     // private readonly MAX_LOCATION_AGE_MINUTES = Math.max(5, Math.min(120, parseInt(process.env.LOCATION_MAX_AGE_MINUTES || '30')));
     // private readonly FEATURE_ENABLED = process.env.LOCATION_AUTO_CLOCK_OUT_ENABLED !== 'false';
     // private readonly NOTIFICATION_ENABLED = process.env.LOCATION_NOTIFICATIONS_ENABLED !== 'false';
-    private readonly CHECK_INTERVAL_MINUTES = 30;
-    private readonly MAX_LOCATION_AGE_MINUTES = 30;
+    private readonly CHECK_INTERVAL_MINUTES = 1;
+    private readonly MAX_LOCATION_AGE_MINUTES = 1;
     private readonly FEATURE_ENABLED = true;
     private readonly NOTIFICATION_ENABLED = true;
+    // private readonly DRY_RUN_MODE = true; // Don't actually perform clock outs
 
     startMonitoring(): void {
         if (this.isRunning) {
@@ -77,20 +80,23 @@ export class LocationMonitoringService {
         try {
             console.log('🔍 Running location monitoring check...');
 
-            const clockedInEmployees = await this.findClockedInEmployees();
+            // Get healthy databases once for this entire check cycle
+            const healthyDbs = await getHealthyDbInstances();
+
+            const clockedInEmployees = await this.findClockedInEmployees(healthyDbs);
 
             if (clockedInEmployees.length === 0) {
                 console.log('No employees currently clocked in');
                 return;
             }
 
-            console.log(`Found ${clockedInEmployees.length} clocked-in employees`);
+            console.log(`********** Found ${clockedInEmployees.length} clocked-in employees **********`);
 
             const autoClockOutResults: AutoClockOutResult[] = [];
 
             for (const { employee, attendance, projectName } of clockedInEmployees) {
                 try {
-                    const result = await this.checkAndAutoClockOut(employee, attendance, projectName);
+                    const result = await this.checkAndAutoClockOut(employee, attendance, projectName, healthyDbs);
                     if (result) {
                         autoClockOutResults.push(result);
                     }
@@ -110,23 +116,20 @@ export class LocationMonitoringService {
         }
     }
 
-    private async findClockedInEmployees(): Promise<ClockedInEmployee[]> {
-        const healthyDbs = await getHealthyDbInstances();
+    private async findClockedInEmployees(healthyDbs: Record<string, firestore.Firestore>): Promise<ClockedInEmployee[]> {
         const clockedInEmployees: ClockedInEmployee[] = [];
 
         for (const [projectName, db] of Object.entries(healthyDbs)) {
             try {
                 // Find attendance records with lastClockInTimestamp set (indicating currently clocked in)
                 const attendanceRef = db.collection('attendance');
-                const currentYear = dayjs.tz().year();
-                const currentMonth = dayjs.tz().format('MMMM') as "January" | "February" | "March" | "April" | "May" | "June" | "July" | "August" | "September" | "October" | "November" | "December";
 
                 // Fetch all attendance records for current month and filter client-side
                 // This avoids needing composite indexes on multiple fields across many databases
                 const attendanceQuery = await retryDatabaseOperation(async () => {
                     return await attendanceRef
-                        .where('year', '==', currentYear)
-                        .where('month', '==', currentMonth)
+                        .where('year', '==', dayjs.utc().year())
+                        .where('month', '==', dayjs.utc().format('MMMM') as "January" | "February" | "March" | "April" | "May" | "June" | "July" | "August" | "September" | "October" | "November" | "December")
                         .get();
                 }, 2, 1000, projectName);
 
@@ -141,20 +144,24 @@ export class LocationMonitoringService {
                     attendance.id = attendanceDoc.id;
 
                     // Get employee data
-                    const employeeRef = db.collection('employee').doc(attendance.uid);
+                    const employeesRef = db.collection('employee');
                     const employeeDoc = await retryDatabaseOperation(async () => {
-                        return await employeeRef.get();
+                        return await employeesRef
+                            .where('uid', '==', attendance.uid)
+                            .limit(1)
+                            .get();
                     }, 2, 1000, projectName);
 
-                    if (employeeDoc.exists) {
-                        const employee = employeeDoc.data() as EmployeeModel;
-                        employee.id = employeeDoc.id;
-
-                        clockedInEmployees.push({
-                            employee,
-                            attendance,
-                            projectName
-                        });
+                    if (!employeeDoc.empty) {
+                        const doc = employeeDoc.docs[0];
+                        if (doc && doc.exists) {
+                            const employee = { id: doc.id, uid: doc.data().uid, ...doc.data() } as EmployeeModel;
+                            clockedInEmployees.push({
+                                employee,
+                                attendance,
+                                projectName
+                            });
+                        }
                     }
                 }
             } catch (error) {
@@ -169,7 +176,8 @@ export class LocationMonitoringService {
     private async checkAndAutoClockOut(
         employee: EmployeeModel,
         attendance: AttendanceModel,
-        projectName: string
+        projectName: string,
+        healthyDbs: Record<string, firestore.Firestore>
     ): Promise<AutoClockOutResult | null> {
         // Skip if employee has no working area defined
         if (!employee.workingArea || employee.workingArea.trim() === '') {
@@ -184,74 +192,110 @@ export class LocationMonitoringService {
             this.MAX_LOCATION_AGE_MINUTES
         );
 
+        console.log(`   - Location validation result:`, {
+            isValid: validation.isValid,
+            error: validation.error,
+            isLive: validation.isLive,
+            coordinates: validation.coordinates,
+            locationAge: validation.locationAge
+        });
+
         if (validation.isValid) {
             // Employee is within working area, no action needed
+            console.log(`   - Employee is within working area - no action needed`);
             return null;
         }
 
-        // Check if the error is specifically about being outside working area
-        if (!validation.error?.includes('outside your designated working area')) {
-            // Different validation error (no location, old location, invalid working area, etc.) - don't auto clock out
+        // Decide whether this validation failure should trigger an auto clock-out
+        // Trigger conditions:
+        //  - outside your designated working area (live location)
+        //  - location sharing is not active (not live)
+        //  - location sharing has ended
+        //  - location data is too old
+        //
+        // Do NOT trigger when there's literally no location data at all (validation.error is "No location data available...")
+        const triggerErrors = [
+            'outside your designated working area',
+            'Location sharing is not active',
+            'Location sharing has ended',
+            'Location data is too old'
+        ];
+        if (!validation.error || !triggerErrors.some(err => validation.error!.includes(err))) {
+            // Validation failed for a non-trigger reason (e.g., malformed working area, no location)
             console.log(`Skipping auto clock-out for ${employee.uid}: ${validation.error}`);
             return null;
         }
 
         // Check if employee was recently auto clocked out (prevent spam)
-        const lastClockOut = attendance.values[dayjs.tz(attendance.lastClockInTimestamp).date() - 1]?.workedHours
+        const lastClockOut = attendance.values[dayjs.utc(attendance.lastClockInTimestamp).date() - 1]?.workedHours
             .filter(wh => wh.type === 'Clock Out')
-            .sort((a, b) => dayjs.tz(b.timestamp).diff(dayjs.tz(a.timestamp)))[0];
+            .sort((a, b) => dayjs.utc(b.timestamp).diff(dayjs.utc(a.timestamp)))[0];
 
         if (lastClockOut) {
-            const minutesSinceLastClockOut = dayjs.tz().diff(dayjs.tz(lastClockOut.timestamp), 'minute');
+            const minutesSinceLastClockOut = dayjs.utc().diff(dayjs.utc(lastClockOut.timestamp), 'minute');
             if (minutesSinceLastClockOut < this.CHECK_INTERVAL_MINUTES) {
                 console.log(`Skipping auto clock-out for ${employee.uid}: recently clocked out (${minutesSinceLastClockOut} minutes ago)`);
                 return null;
             }
         }
 
-        // Employee is outside working area - perform auto clock-out
-        console.log(`Auto clocking out employee ${employee.uid} - outside working area`);
+        // if (this.DRY_RUN_MODE) {
+        //     console.log(`   - DRY RUN: Simulating auto clock-out (no database changes)`);
+        //     const result = {
+        //         success: true,
+        //         employeeId: employee.uid,
+        //         employeeName: getEmployeeFullName(employee),
+        //         employeeChatID: employee.telegramChatID,
+        //         managerChatID: null,
+        //         error: null,
+        //         reason: validation.error ?? 'Outside working area'
+        //     };
+        //     return result;
+        // }
 
-        const clockOutResult = await this.performAutoClockOut(attendance, projectName);
+        const clockOutResult = await this.performAutoClockOut(attendance, projectName, healthyDbs);
 
         if (!clockOutResult.success) {
             return {
                 success: false,
                 employeeId: employee.uid,
                 employeeName: getEmployeeFullName(employee),
-                managerChatId: null,
+                employeeChatID: employee.telegramChatID,
+                managerChatID: null,
                 error: clockOutResult.error || null
             };
         }
 
         // Find manager's telegram chat ID
-        let managerChatId: string | null = null;
+        let managerChatID: string | null = null;
         if (employee.reportingLineManager) {
-            managerChatId = await this.findManagerChatId(employee.reportingLineManager, projectName) || null;
+            managerChatID = await this.findManagerChatID(employee.reportingLineManager, projectName, healthyDbs) || null;
         }
 
         return {
             success: true,
             employeeId: employee.uid,
             employeeName: getEmployeeFullName(employee),
-            managerChatId
+            employeeChatID: employee.telegramChatID,
+            managerChatID,
+            reason: validation.error ?? 'Outside working area'
         };
     }
 
-    private async performAutoClockOut(attendance: AttendanceModel, projectName: string): Promise<{ success: boolean; error?: string }> {
-        const db = (await getHealthyDbInstances())[projectName];
+    private async performAutoClockOut(attendance: AttendanceModel, projectName: string, healthyDbs: Record<string, firestore.Firestore>): Promise<{ success: boolean; error?: string }> {
+        const db = healthyDbs[projectName];
         if (!db) {
             return { success: false, error: 'Database not available' };
         }
 
         try {
             // Use the existing clockInOrOut logic but adapted for server-side
-            const clockInDate = dayjs.tz(attendance.lastClockInTimestamp);
-            const clockOutTimestamp = dayjs.tz().toISOString();
+            const clockInDate = dayjs.utc(attendance.lastClockInTimestamp);
+            const clockOutTimestamp = dayjs.utc().toISOString();
             const clockInDayIndex = clockInDate.date() - 1;
 
             // Calculate hours worked
-            const hoursWorked = dayjs.tz().diff(dayjs.tz(attendance.lastClockInTimestamp), 'hours', true);
+            const hoursWorked = dayjs.utc().diff(dayjs.utc(attendance.lastClockInTimestamp), 'hours', true);
 
             // Get worked hours array
             const workedHours = attendance.values[clockInDayIndex]?.workedHours || [];
@@ -261,7 +305,7 @@ export class LocationMonitoringService {
                 id: crypto.randomUUID(),
                 timestamp: clockOutTimestamp,
                 type: 'Clock Out',
-                hour: dayjs.tz().format('h:mm A')
+                hour: dayjs.utc().format('h:mm A')
             };
 
             workedHours.push(clockOutEntry);
@@ -285,7 +329,7 @@ export class LocationMonitoringService {
                 },
                 monthlyWorkedHours,
                 lastClockInTimestamp: null, // Clear clock-in timestamp
-                lastChanged: getTimestamp()
+                lastChanged: dayjs.utc().toISOString()
             };
 
             await retryDatabaseOperation(async () => {
@@ -299,18 +343,24 @@ export class LocationMonitoringService {
         }
     }
 
-    private async findManagerChatId(managerUid: string, projectName: string): Promise<string | undefined> {
+    private async findManagerChatID(managerUid: string, projectName: string, healthyDbs: Record<string, firestore.Firestore>): Promise<string | undefined> {
         try {
-            const db = (await getHealthyDbInstances())[projectName];
+            const db = healthyDbs[projectName];
             if (!db) return undefined;
 
             const managerDoc = await retryDatabaseOperation(async () => {
-                return await db.collection('employee').doc(managerUid).get();
+                return await db.collection('employee')
+                    .where('uid', '==', managerUid)
+                    .limit(1)
+                    .get();
             }, 2, 1000, projectName);
 
-            if (managerDoc.exists) {
-                const manager = managerDoc.data() as EmployeeModel;
-                return manager.telegramChatID || undefined;
+            if (!managerDoc.empty) {
+                const doc = managerDoc.docs[0];
+                if (doc && doc.exists) {
+                    const manager = { id: doc.id, uid: doc.data().uid, ...doc.data() } as EmployeeModel;
+                    return manager.telegramChatID || undefined;
+                }
             }
         } catch (error) {
             console.error('Error finding manager chat ID:', error);
@@ -328,47 +378,26 @@ export class LocationMonitoringService {
             if (result.success) {
                 // Find employee's telegram chat ID - we need to pass the correct project
                 // For now, we'll search across all projects (inefficient but works)
-                const employeeChatId = await this.findEmployeeChatIdAcrossProjects(result.employeeId);
-                if (employeeChatId) {
+                const reasonText = result.reason ?? 'you are outside your designated working area';
+                if (result.employeeChatID) {
                     await sendMessage(
-                        parseInt(employeeChatId),
-                        `⚠️ You have been automatically clocked out because you are outside your designated working area.`
+                        parseInt(result.employeeChatID),
+                        `⚠️ You have been automatically clocked out because ${reasonText}.`
                     );
                 }
             }
 
             // Notify manager
-            if (result.managerChatId) {
+            if (result.managerChatID) {
+                const managerReasonText = result.reason ?? 'being outside the working area';
                 await sendMessage(
-                    parseInt(result.managerChatId),
-                    `👤 Employee ${result.employeeName} has been automatically clocked out due to being outside the working area.`
+                    parseInt(result.managerChatID),
+                    `👤 Employee ${result.employeeName} has been automatically clocked out due to ${managerReasonText}.`
                 );
             }
         } catch (error) {
             console.error('Error sending notifications:', error);
         }
-    }
-
-    private async findEmployeeChatIdAcrossProjects(employeeUid: string): Promise<string | null> {
-        const healthyDbs = await getHealthyDbInstances();
-        for (const [projectName, db] of Object.entries(healthyDbs)) {
-            try {
-                const employeeDoc = await retryDatabaseOperation(async () => {
-                    return await db.collection('employee').doc(employeeUid).get();
-                }, 2, 1000, projectName);
-
-                if (employeeDoc.exists) {
-                    const employee = employeeDoc.data() as EmployeeModel;
-                    if (employee.telegramChatID) {
-                        return employee.telegramChatID;
-                    }
-                }
-            } catch (error) {
-                console.error(`Error finding employee chat ID in ${projectName}:`, error);
-                continue;
-            }
-        }
-        return null;
     }
 }
 
