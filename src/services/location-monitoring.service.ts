@@ -32,8 +32,8 @@ export class LocationMonitoringService {
     // private readonly MAX_LOCATION_AGE_MINUTES = Math.max(5, Math.min(120, parseInt(process.env.LOCATION_MAX_AGE_MINUTES || '30')));
     // private readonly FEATURE_ENABLED = process.env.LOCATION_AUTO_CLOCK_OUT_ENABLED !== 'false';
     // private readonly NOTIFICATION_ENABLED = process.env.LOCATION_NOTIFICATIONS_ENABLED !== 'false';
-    private readonly CHECK_INTERVAL_MINUTES = 1;
-    private readonly MAX_LOCATION_AGE_MINUTES = 1;
+    private readonly CHECK_INTERVAL_MINUTES = 5;
+    private readonly MAX_LOCATION_AGE_MINUTES = 10;
     private readonly FEATURE_ENABLED = true;
     private readonly NOTIFICATION_ENABLED = true;
     // private readonly DRY_RUN_MODE = true; // Don't actually perform clock outs

@@ -12,6 +12,8 @@ import {
 import TelegramBot from 'node-telegram-bot-api';
 import type { Location as TgLocation } from 'node-telegram-bot-api';
 import dayjs from 'dayjs';
+import getFullName from './util/getEmployeeFullName';
+import { EmployeeModel } from './models/employee';
 
 // In-memory storage for chat sessions
 interface ChatSession {
@@ -19,6 +21,7 @@ interface ChatSession {
     projectName: string;
     employeeUid: string;
     employeeId: string;
+    employeeName: string;
 }
 
 const isDev = process.env.NODE_ENV === "development";
@@ -179,7 +182,7 @@ bot.onText(/\/app/, async (msg: TelegramMessage) => {
         // Send app link with inline keyboard (skip phone verification message)
         await sendMessage(
             chatId,
-            `⬇️ Click below to open your oneHR dashboard:\n\n💡 Use /app if this doesn't work\n\n ⚠️ This link expires after 1 hour!`,
+            buildAuthAppMessage(session.employeeName),
             {
                 inline_keyboard: [
                     [{ text: '🚀 Open oneHR App', web_app: { url: appUrl } }]
@@ -197,7 +200,7 @@ bot.onText(/\/app/, async (msg: TelegramMessage) => {
         // Send basic app link
         await sendMessage(
             chatId,
-            '⬇️ Click below to open your oneHR dashboard:\n\n💡 Use /app command to get a new authenticated link\n\n ⚠️ This link expires after 1 hour!',
+            buildBasicAppMessage(session.employeeName),
             {
                 inline_keyboard: [
                     [{ text: '🚀 Open oneHR App', web_app: { url: basicUrl } }]
@@ -263,6 +266,21 @@ export async function removeKeyboard(chatId: number): Promise<TelegramBot.Messag
 }
 
 
+// Helpers: format names and compose messages
+function normalizeName(name: string | null | undefined): string {
+    return (name ?? '').replace(/\s+/g, ' ').trim();
+}
+
+function buildAuthAppMessage(name?: string): string {
+    const greeting = name && name.trim() ? `👋 Welcome back ${name}!\n\n` : '';
+    return `${greeting}⬇️ Click below to open your oneHR dashboard:\n\n💡 Use /app if this doesn't work\n\n ⚠️ This link expires after 1 hour!`;
+}
+
+function buildBasicAppMessage(name?: string): string {
+    const greeting = name && name.trim() ? `👋 Welcome back ${name}!\n\n` : '';
+    return `${greeting}⬇️ Click below to open your oneHR dashboard:\n\n💡 Use /app command to get a new authenticated link\n\n ⚠️ This link expires after 1 hour!`;
+}
+
 // Send contact request message
 export async function sendContactRequest(chatId: number): Promise<TelegramBot.Message> {
     const keyboard = createContactKeyboard();
@@ -278,7 +296,8 @@ export async function sendAppLink(
     chatId: number,
     phoneNumber: string,
     projectName: string,
-    employeeUid: string
+    employeeUid: string,
+    employeeName?: string
 ): Promise<TelegramBot.Message> {
     try {
         // Generate authentication token for the employee
@@ -318,7 +337,7 @@ export async function sendAppLink(
         // Send app link with inline keyboard
         return sendMessage(
             chatId,
-            `⬇️ Click below to open your oneHR dashboard:\n\n💡 Use /app if this doesn't work\n\n ⚠️ This link expires after 1 hour!`,
+            buildAuthAppMessage(employeeName),
             {
                 inline_keyboard: [
                     [{ text: '🚀 Open oneHR App', web_app: { url: appUrl } }]
@@ -341,7 +360,7 @@ export async function sendAppLink(
         // Send basic app link
         return sendMessage(
             chatId,
-            '⬇️ Click below to open your oneHR dashboard:\n\n💡 Use /app command to get a new authenticated link\n\n ⚠️ This link expires after 1 hour!',
+            buildBasicAppMessage(employeeName),
             {
                 inline_keyboard: [
                     [{ text: '🚀 Open oneHR App', web_app: { url: basicUrl } }]
@@ -469,16 +488,17 @@ async function handleContactShare(chatId: number, contact: Contact): Promise<voi
             const updateSuccess = await updateEmployeeTelegramChatID(employee.id, chatId, projectName);
 
             if (updateSuccess) {
+                const fullName = normalizeName(getFullName(employee as unknown as EmployeeModel));
                 // Store session data for future /app command usage
                 chatSessions.set(chatId, {
                     phoneNumber: normalizedPhone,
                     projectName,
                     employeeUid: employee.uid,
-                    employeeId: employee.id
+                    employeeId: employee.id,
+                    employeeName: fullName
                 });
-
                 // Send success message with app link (includes auth token generation)
-                await sendAppLink(chatId, normalizedPhone, projectName, employee.uid);
+                await sendAppLink(chatId, normalizedPhone, projectName, employee.uid, fullName);
                 // Prompt to share live/static location
                 await sendLocationPrompt(chatId);
                 console.log(`Successfully linked employee ${employee.id} to chat ${chatId}`);
