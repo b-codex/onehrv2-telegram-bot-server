@@ -1,7 +1,7 @@
 import dayjs from 'dayjs';
 import { sendMessage } from '../bot';
 import { getHealthyDbInstances, retryDatabaseOperation } from '../firebase-config';
-import { AttendanceModel, WorkedHoursModel } from '../models/attendance';
+import { AttendanceModel, WorkedHoursModel, DailyAttendance } from '../models/attendance';
 import { EmployeeModel } from '../models/employee';
 import getEmployeeFullName from '../util/getEmployeeFullName';
 import { validateEmployeeLocationAndArea } from '../util/locationValidation';
@@ -289,17 +289,23 @@ export class LocationMonitoringService {
         }
 
         try {
-            // Use the existing clockInOrOut logic but adapted for server-side
             const clockInDate = dayjs.utc(attendance.lastClockInTimestamp);
             const clockOutTimestamp = dayjs.utc().toISOString();
             const clockInDayIndex = clockInDate.date() - 1;
-
+ 
             // Calculate hours worked
             const hoursWorked = dayjs.utc().diff(dayjs.utc(attendance.lastClockInTimestamp), 'hours', true);
-
-            // Get worked hours array
-            const workedHours = attendance.values[clockInDayIndex]?.workedHours || [];
-
+ 
+            // Normalize to an array to avoid converting to a map/object when updating Firestore
+            const baseValues: DailyAttendance[] = Array.isArray(attendance.values)
+                ? [...attendance.values]
+                : this.normalizeAttendanceValues(attendance.values);
+ 
+            // Clone existing worked hours for the day (if any)
+            const workedHours: WorkedHoursModel[] = baseValues[clockInDayIndex]?.workedHours
+                ? [...baseValues[clockInDayIndex]!.workedHours]
+                : [];
+ 
             // Add clock-out entry
             const clockOutEntry: WorkedHoursModel = {
                 id: crypto.randomUUID(),
@@ -307,35 +313,47 @@ export class LocationMonitoringService {
                 type: 'Clock Out',
                 hour: dayjs.utc().format('h:mm A')
             };
-
             workedHours.push(clockOutEntry);
-
+ 
             // Update daily and monthly worked hours
-            const dailyWorkedHours = (attendance.values[clockInDayIndex]?.dailyWorkedHours || 0) + hoursWorked;
+            const dailyWorkedHours = (baseValues[clockInDayIndex]?.dailyWorkedHours || 0) + hoursWorked;
             const monthlyWorkedHours = attendance.monthlyWorkedHours + hoursWorked;
-
+ 
+            // Build updated day entry (initialize when missing)
+            const updatedDay: DailyAttendance = {
+                ...(baseValues[clockInDayIndex] || {
+                    id: crypto.randomUUID(),
+                    day: clockInDayIndex + 1,
+                    value: null,
+                    timestamp: clockOutTimestamp,
+                    from: null,
+                    to: null,
+                    status: 'N/A' as const,
+                    dailyWorkedHours: 0,
+                    workedHours: []
+                }),
+                workedHours,
+                dailyWorkedHours,
+                value: 'A', // Mark as absent due to auto clock-out
+                status: 'Submitted',
+                timestamp: clockOutTimestamp
+            };
+ 
+            // Keep values as an array
+            baseValues[clockInDayIndex] = updatedDay;
+ 
             // Update attendance record
             const updateData = {
-                values: {
-                    ...attendance.values,
-                    [clockInDayIndex]: {
-                        ...attendance.values[clockInDayIndex],
-                        workedHours,
-                        dailyWorkedHours,
-                        value: 'A', // Mark as absent due to auto clock-out
-                        status: 'Submitted',
-                        timestamp: clockOutTimestamp
-                    }
-                },
+                values: baseValues,
                 monthlyWorkedHours,
                 lastClockInTimestamp: null, // Clear clock-in timestamp
                 lastChanged: dayjs.utc().toISOString()
             };
-
+ 
             await retryDatabaseOperation(async () => {
                 return await db.collection('attendance').doc(attendance.id).update(updateData);
             }, 2, 1000, projectName);
-
+ 
             return { success: true };
         } catch (error) {
             console.error('Error performing auto clock-out:', error);
@@ -343,6 +361,25 @@ export class LocationMonitoringService {
         }
     }
 
+    private normalizeAttendanceValues(raw: unknown): DailyAttendance[] {
+        // If it's already an array, return as-is
+        if (Array.isArray(raw)) {
+            return raw as DailyAttendance[];
+        }
+        // Convert map-like object with numeric keys to array, preserving indices
+        const arr: DailyAttendance[] = [];
+        if (raw && typeof raw === 'object') {
+            const entries = Object.entries(raw as Record<string, unknown>);
+            for (const [k, v] of entries) {
+                const idx = parseInt(k, 10);
+                if (!Number.isNaN(idx) && idx >= 0 && idx < 31) {
+                    arr[idx] = v as DailyAttendance;
+                }
+            }
+        }
+        return arr;
+    }
+ 
     private async findManagerChatID(managerUid: string, projectName: string, healthyDbs: Record<string, firestore.Firestore>): Promise<string | undefined> {
         try {
             const db = healthyDbs[projectName];
